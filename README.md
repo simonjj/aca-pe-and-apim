@@ -1,4 +1,4 @@
-# testing-aca-apim — Front a private Azure Container App with a WAF (and optional APIM)
+# Front a private Azure Container App with a WAF (and optional APIM)
 
 An [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/) template that stands up a **Streamlit** app on an **internal (VNet-isolated) Azure Container Apps** environment and fronts it with an **Application Gateway (WAF v2)**. An **API Management** tier (App Gateway → APIM → ACA) is available as an optional, documented add-on.
 
