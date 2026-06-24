@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: testing-aca-apim
+metadata:
+  template: testing-aca-apim@1.0.0
+services:
+  streamlit:
+    project: ./src
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true

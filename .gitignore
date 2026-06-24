@@ -1,0 +1,17 @@
+# Azure Developer CLI local environment state (subscription IDs, endpoints, secrets)
+.azure/
+
+# Logs
+*.log
+
+# Compiled/generated ARM artifacts (azd builds from the .bicep sources)
+infra/main.json
+infra/*.bicepparam
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
