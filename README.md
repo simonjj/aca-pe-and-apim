@@ -23,7 +23,7 @@ flowchart LR
     Client[Client] -->|HTTP/HTTPS| AGW[Application Gateway WAF v2<br/>public IP]
     subgraph VNet[Virtual Network]
         AGW -->|HTTPS, Host = app FQDN| APIM[(API Management<br/>optional, External VNet)]
-        APIM -->|HTTPS, path rewrite| CA
+        APIM -->|HTTPS, path preserved| CA
         AGW -.->|default path: HTTPS direct| CA[Streamlit Container App]
         subgraph ACAENV[Internal ACA environment]
             CA
@@ -40,7 +40,7 @@ Client ──► App Gateway (WAF v2, public IP)
                  │  (in VNet)
                  ├─ default ─────────────► Streamlit Container App (internal ACA env)
                  └─ optional ─► APIM ─────► Streamlit Container App
-                                (External VNet mode, path rewrite + Host override)
+                                (External VNet mode, root path + Host/X-Forwarded headers)
 Private DNS (env default domain) resolves the app FQDN to the env's private IP inside the VNet.
 Container image is pulled from ACR using a user-assigned managed identity (AcrPull).
 ```
@@ -55,7 +55,7 @@ Container image is pulled from ACR using a user-assigned managed identity (AcrPu
 | Internal ACA managed environment | Private (no public endpoint) Consumption environment. |
 | Private DNS zone (env default domain) | Lets in-VNet front ends resolve the app FQDN to the env's private IP. |
 | Streamlit Container App | The workload (port 8501, WebSocket-capable). Tagged `azd-service-name: streamlit`. |
-| Application Gateway (WAF v2) + public IP | Public front door; HTTP listener; HTTPS to the backend with Host = app FQDN; health probe accepts `200-499`. |
+| Application Gateway (WAF v2) + public IP | Public front door; HTTP listener; HTTPS to the backend with Host = app FQDN; health probe accepts `200-399`. |
 | API Management (optional) | External VNet-mode gateway in front of the app. |
 
 ---
@@ -98,13 +98,24 @@ azd up
 azd provision
 ```
 
+The APIM API is mounted at the gateway **root** (`path: ''`) with catch-all operations (`/*` for every HTTP method), so App Gateway can forward `/` straight through and APIM proxies the full request path unchanged — no path prefix (`/app`, `/api`, …) is required or expected. The inbound policy preserves the original path (no `rewrite-uri`), sets `Host` to the ACA FQDN for ingress SNI, and sets `X-Forwarded-Host`/`X-Forwarded-Proto` to the external App Gateway host so Easy Auth redirects resolve to the front door rather than the internal ACA URL.
+
 ### Enable Easy Auth (Entra)
 
-1. Create an Entra app registration; add redirect URI `https://<frontend-host>/.auth/login/aad/callback`.
+1. Create an Entra app registration; add redirect URI `https://<frontend-host>/.auth/login/aad/callback`, where `<frontend-host>` is the **App Gateway** public FQDN (not the ACA FQDN).
 2. Set parameters: `enableEasyAuth=true`, `entraClientId`, `entraTenantId`, `entraClientSecret`.
 3. `azd provision`.
 
-The template sets `forwardProxy.convention = Standard` so Easy Auth builds OAuth redirect URIs from the **external** host/scheme (required behind App Gateway/APIM).
+The template sets `forwardProxy.convention = Standard` so Easy Auth builds OAuth redirect URIs from the **external** host/scheme. With the APIM tier, that external host is propagated via the `X-Forwarded-Host` header set in the APIM policy; without it Easy Auth would fall back to the `Host` header (the ACA FQDN) and redirect to the internal URL.
+
+### Easy Auth (interactive login) vs APIM `validate-jwt`
+
+These are two **different** auth models — don't conflate them:
+
+- **Easy Auth** (this template) is interactive, browser-based, cookie sign-in. The user is redirected to Entra, signs in, and the container app receives a session cookie. Use it for human-facing apps (like the Streamlit front end).
+- **APIM `validate-jwt`** validates a **bearer token** that an API client already holds. It does not perform an interactive login. Adding `validate-jwt` to the API policy in front of an Easy-Auth-protected browser app will reject normal browser requests (no `Authorization: Bearer` header) and is the usual cause of "missing in app registration" / redirect confusion.
+
+If you need bearer-token enforcement at APIM (machine-to-machine clients), add `validate-jwt` to the inbound policy and have clients present a token — but expose that as a separate API/flow from the interactive Easy Auth path.
 
 ---
 
@@ -122,12 +133,13 @@ The template sets `forwardProxy.convention = Standard` so Easy Auth builds OAuth
 
 | Symptom | Likely cause / fix |
 |---|---|
-| **App Gateway returns 502** | Backend probe unhealthy. The probe accepts `200-499`; confirm the app responds on `/`. Check that the App Gateway backend `hostName` and probe `host` are the app FQDN (SNI/Host must match the ACA ingress certificate). |
-| **App Gateway returns 404** | Path/routing. With APIM, confirm the API `path` and the `rewrite-uri` policy. Direct to ACA, confirm the routing rule points at the ACA backend pool. |
+| **App Gateway returns 502** | Backend probe unhealthy. The probe accepts `200-399`; confirm the app responds on `/` (direct) or APIM responds on `/status-0123456789abcdef` (APIM tier). Check that the App Gateway backend `hostName` and probe `host` are the backend FQDN (SNI/Host must match the backend's ingress certificate). |
+| **App Gateway returns 404 (APIM tier)** | Routing/operation miss. The API must be mounted at the **root** path (`path: ''`) and expose **catch-all operations** (`/*` per method); otherwise APIM can't match `/` and returns 404 for everything. Do **not** add an `/app` or `/api` prefix — the gateway forwards `/` unchanged. Direct to ACA, confirm the routing rule points at the ACA backend pool. |
 | **`ManagementApiRequestFailed` / cannot connect to `*.management.azure-api.net:3443`** | APIM management-plane connectivity (see Limitations). Verify the subnet NSG allows inbound `3443` from the `ApiManagement` service tag and `6390` from `AzureLoadBalancer`; if it still fails in a corp subscription, use the App Gateway → ACA direct path. |
 | **Container app unhealthy right after `azd provision`** | Expected: it starts on a placeholder image until `azd deploy` pushes the Streamlit image. Run `azd deploy` (or `azd up`). |
 | **Streamlit shows a blank page / WebSocket errors** | Ensure App Gateway/APIM forward WebSockets (`/_stcore/stream`) and the app runs with CORS/XSRF disabled behind the proxy (already set in `./src/Dockerfile`). |
-| **Easy Auth redirect loop / fails from outside** | The reverse proxy must forward the external host/scheme. Keep `forwardProxy.convention = Standard`, use an HTTPS front end, and register the exact redirect URI in Entra. |
+| **Easy Auth redirect loop / redirects to the internal ACA URL** | The reverse proxy must forward the external host/scheme. Keep `forwardProxy.convention = Standard`; with APIM, ensure the inbound policy sets `X-Forwarded-Host` to the App Gateway host and `X-Forwarded-Proto: https` (set by this template). Use an HTTPS front end and register the exact App Gateway redirect URI in Entra. A redirect to the internal `*.azurecontainerapps.io` URL means the external host wasn't forwarded. |
+| **Login works but APIM `validate-jwt` rejects browser requests** | `validate-jwt` expects a bearer token; interactive Easy Auth uses cookies. Don't put `validate-jwt` in front of the interactive browser app — see "Easy Auth vs APIM `validate-jwt`" above. |
 | **`ImagePullBackOff` on the container app** | The user-assigned identity needs `AcrPull` on the registry (granted by the template) and the registry must be reachable; re-run `azd provision` if the role assignment lagged. |
 
 ---
