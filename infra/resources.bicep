@@ -13,6 +13,9 @@ param streamlitImage string
 @description('Deploy the optional APIM tier.')
 param deployApim bool
 
+@description('Deploy APIM in Internal VNet mode (gateway reachable only from inside the VNet).')
+param apimInternal bool = false
+
 @description('Enable ACA Easy Auth.')
 param enableEasyAuth bool
 
@@ -274,6 +277,19 @@ module apim 'modules/apim.bicep' = if (deployApim) {
     apimSubnetId: vnet.properties.subnets[1].id
     appFqdn: app.properties.configuration.ingress.fqdn
     frontendHost: agwFrontendFqdn
+    apimInternal: apimInternal
+    tags: tags
+  }
+}
+
+// Internal mode: APIM has no public gateway, so the App Gateway resolves <apim>.azure-api.net to
+// the service's private VNet IP through this zone. Skipped in External mode (public DNS is used).
+module apimDns 'modules/apimPrivateDns.bicep' = if (deployApim && apimInternal) {
+  name: 'apimDns'
+  params: {
+    apimName: 'apim-${resourceToken}'
+    apimPrivateIp: apim.outputs.privateIpAddress
+    vnetId: vnet.id
     tags: tags
   }
 }

@@ -13,14 +13,20 @@ param appFqdn string
 @description('External front-end host (App Gateway public FQDN). Used to set X-Forwarded-Host so Easy Auth builds redirect URIs from the external host, not the internal ACA FQDN.')
 param frontendHost string
 
+@description('Deploy APIM in Internal VNet mode (gateway only reachable from inside the VNet). When false, External mode keeps gateway + management endpoints public.')
+param apimInternal bool = false
+
 @description('Tags.')
 param tags object
 
 @description('Publisher email.')
 param publisherEmail string = 'admin@contoso.com'
 
-// External VNet mode: gateway + management endpoints are public, so ARM can configure APIs,
-// while the service can still reach private (internal ACA) backends over the VNet.
+// VNet integration mode:
+// - External: gateway + management endpoints are public, so ARM can configure APIs while the
+//   service reaches private (internal ACA) backends over the VNet.
+// - Internal: every endpoint is private; the App Gateway fronts the gateway via a private DNS
+//   zone (azure-api.net) that maps the gateway host to the service's VNet IP.
 // NOTE: in network-restricted/corporate subscriptions the APIM management endpoint may be
 // unreachable from the APIM resource provider; API config can fail with ManagementApiRequestFailed.
 resource apimPip 'Microsoft.Network/publicIPAddresses@2023-11-01' = {
@@ -50,7 +56,7 @@ resource apim 'Microsoft.ApiManagement/service@2023-09-01-preview' = {
   properties: {
     publisherEmail: publisherEmail
     publisherName: 'testing-aca-apim'
-    virtualNetworkType: 'External'
+    virtualNetworkType: apimInternal ? 'Internal' : 'External'
     virtualNetworkConfiguration: {
       subnetResourceId: apimSubnetId
     }
@@ -106,3 +112,6 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2023-09-01-pre
 }
 
 output gatewayHostName string = '${apimName}.azure-api.net'
+
+@description('Private VNet IP of the APIM service (only populated in Internal mode).')
+output privateIpAddress string = apimInternal ? (first(apim.properties.privateIPAddresses) ?? '') : ''
