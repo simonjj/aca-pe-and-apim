@@ -18,6 +18,9 @@ param streamlitImage string = 'mcr.microsoft.com/azuredocs/containerapps-hellowo
 @description('Deploy the optional API Management tier (App Gateway -> APIM -> ACA). Default false. See README "Limitations": in network-restricted/corporate subscriptions the APIM management endpoint can be unreachable and API config will fail.')
 param deployApim bool = false
 
+@description('Deploy APIM in Internal VNet mode (gateway reachable only from inside the VNet, fronted by the App Gateway via private DNS). Default false (External). Only applies when deployApim is true.')
+param apimInternal bool = false
+
 @description('Enable ACA Easy Auth (Entra). Requires an app registration; see README.')
 param enableEasyAuth bool = false
 
@@ -50,6 +53,7 @@ module resources 'resources.bicep' = {
     tags: tags
     streamlitImage: streamlitImage
     deployApim: deployApim
+    apimInternal: apimInternal
     enableEasyAuth: enableEasyAuth
     entraClientId: entraClientId
     entraTenantId: entraTenantId

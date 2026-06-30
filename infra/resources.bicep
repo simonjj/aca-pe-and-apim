@@ -13,6 +13,9 @@ param streamlitImage string
 @description('Deploy the optional APIM tier.')
 param deployApim bool
 
+@description('Deploy APIM in Internal VNet mode (gateway reachable only from inside the VNet).')
+param apimInternal bool = false
+
 @description('Enable ACA Easy Auth.')
 param enableEasyAuth bool
 
@@ -262,6 +265,10 @@ resource authConfig 'Microsoft.App/containerApps/authConfigs@2024-10-02-preview'
 }
 
 // ---------- Optional APIM tier ----------
+// App Gateway public FQDN is deterministic from the PIP domain name label below; compute it as a
+// string so the APIM module can reference it without creating a dependency cycle on the gateway.
+var agwFrontendFqdn = 'aca-apim-${resourceToken}.${location}.cloudapp.azure.com'
+
 module apim 'modules/apim.bicep' = if (deployApim) {
   name: 'apim'
   params: {
@@ -269,6 +276,20 @@ module apim 'modules/apim.bicep' = if (deployApim) {
     apimName: 'apim-${resourceToken}'
     apimSubnetId: vnet.properties.subnets[1].id
     appFqdn: app.properties.configuration.ingress.fqdn
+    frontendHost: agwFrontendFqdn
+    apimInternal: apimInternal
+    tags: tags
+  }
+}
+
+// Internal mode: APIM has no public gateway, so the App Gateway resolves <apim>.azure-api.net to
+// the service's private VNet IP through this zone. Skipped in External mode (public DNS is used).
+module apimDns 'modules/apimPrivateDns.bicep' = if (deployApim && apimInternal) {
+  name: 'apimDns'
+  params: {
+    apimName: 'apim-${resourceToken}'
+    apimPrivateIp: apim.outputs.privateIpAddress
+    vnetId: vnet.id
     tags: tags
   }
 }
@@ -367,13 +388,16 @@ resource agw 'Microsoft.Network/applicationGateways@2023-11-01' = {
         properties: {
           protocol: 'Https'
           host: backendHost
-          path: '/'
+          // Probe APIM's built-in health endpoint when APIM fronts the app; otherwise the app root.
+          path: deployApim ? '/status-0123456789abcdef' : '/'
           interval: 30
           timeout: 30
           unhealthyThreshold: 3
           pickHostNameFromBackendHttpSettings: false
           match: {
-            statusCodes: [ '200-499' ]
+            // Tightened from 200-499 so a 404 (e.g. an APIM routing miss) no longer reads as
+            // "healthy". 302 stays in range for the Easy Auth redirect-to-login response.
+            statusCodes: [ '200-399' ]
           }
         }
       }
